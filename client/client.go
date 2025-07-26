@@ -1,15 +1,16 @@
 package main
-
 import (
 	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
-	pb "github.com/pgibb96/MessageApp/proto"
 	"google.golang.org/grpc"
+	pb "github.com/pgibb96/MessageApp/proto"
+	"github.com/fatih/color"
 )
 
 func main() {
@@ -18,60 +19,97 @@ func main() {
 	}
 	username := os.Args[1]
 
-	// Connect to the server
 	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Fatalf("Failed to connect to gRPC server: %v", err)
 	}
 	defer conn.Close()
 
 	client := pb.NewChatServiceClient(conn)
-
-	// Start ChatStream
 	stream, err := client.ChatStream(context.Background())
 	if err != nil {
-		log.Fatalf("Error starting chat stream: %v", err)
+		log.Fatalf("Failed to create chat stream: %v", err)
 	}
 
-	// Send initial join message
-	err = stream.Send(&pb.MessageRequest{
-		Sender:  username,
-		Message: fmt.Sprintf("%s has joined the chat.", username),
-	})
-	if err != nil {
-		log.Fatalf("Error sending join message: %v", err)
-	}
+	// Track last joined channel for convenience
+	var lastChannel string
 
-	// Goroutine to receive messages
+	// Start goroutine to receive messages
 	go func() {
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
-				log.Fatalf("Error receiving message: %v", err)
+				log.Fatalf("Stream receive error: %v", err)
 			}
+	
+			// Clear current line and move cursor to beginning
+			fmt.Print("\r\033[K")
+	
+			// Color and format message
 			ts := time.Unix(msg.Timestamp, 0).Format("15:04:05")
-			fmt.Printf("[%s] %s: %s\n", ts, msg.Sender, msg.Message)
+			header := color.New(color.FgCyan).Sprintf("[%s] #%s %s:", ts, msg.Channel, msg.Sender)
+			fmt.Printf("%s %s\n", header, msg.Message)
+	
+			// Reprint prompt
+			fmt.Print("> ")
 		}
 	}()
 
-	// Read user input and send messages
+	// Read input from user
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("Enter messages (Ctrl+C to exit):")
+	fmt.Println("🟢 Type messages or commands like:")
+	fmt.Println("   /join general")
+	fmt.Println("   /leave general")
+	fmt.Println("   hello world")
+
 	for scanner.Scan() {
 		text := scanner.Text()
 		if text == "" {
 			continue
 		}
-		err = stream.Send(&pb.MessageRequest{
-			Sender:  username,
-			Message: text,
-		})
-		if err != nil {
-			log.Fatalf("Error sending message: %v", err)
+	
+		// Clear your typed line before sending
+		fmt.Print("\r\033[K")
+
+		if strings.HasPrefix(text, "/join ") {
+			channel := strings.TrimSpace(strings.TrimPrefix(text, "/join "))
+			lastChannel = channel
+			stream.Send(&pb.MessageRequest{
+				Sender:  username,
+				Channel: channel,
+				Type:    pb.RequestType_JOIN,
+			})
+			continue
 		}
+
+		if strings.HasPrefix(text, "/leave ") {
+			channel := strings.TrimSpace(strings.TrimPrefix(text, "/leave "))
+			stream.Send(&pb.MessageRequest{
+				Sender:  username,
+				Channel: channel,
+				Type:    pb.RequestType_LEAVE,
+			})
+			if channel == lastChannel {
+				lastChannel = ""
+			}
+			continue
+		}
+
+		if lastChannel == "" {
+			fmt.Println("⚠️  Join a channel first using /join <channel>")
+			continue
+		}
+
+		// Send message to last joined channel
+		stream.Send(&pb.MessageRequest{
+			Sender:  username,
+			Channel: lastChannel,
+			Message: text,
+			Type:    pb.RequestType_MESSAGE,
+		})
 	}
 
-	if scanner.Err() != nil {
-		log.Printf("Scanner error: %v", scanner.Err())
+	if err := scanner.Err(); err != nil {
+		log.Printf("Scanner error: %v", err)
 	}
 }

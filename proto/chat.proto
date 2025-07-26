@@ -1,21 +1,28 @@
 syntax = "proto3";
 
 package chat;
-
 option go_package = "github.com/pgibb96/MessageApp/proto;chat";
 
 service ChatService {
-  rpc SendMessage (MessageRequest) returns (MessageResponse);
   rpc ChatStream (stream MessageRequest) returns (stream MessageResponse);
 }
 
 message MessageRequest {
   string sender = 1;
   string message = 2;
+  string channel = 3;
+  RequestType type = 4; // NEW: join/leave/message
+}
+
+enum RequestType {
+  MESSAGE = 0; // Default
+  JOIN = 1;
+  LEAVE = 2;
 }
 
 message MessageResponse {
   string sender = 1;
   string message = 2;
   int64 timestamp = 3;
+  string channel = 4; // NEW: clients may want to know which channel it came from
 }

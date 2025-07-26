@@ -19,15 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ChatService_SendMessage_FullMethodName = "/chat.ChatService/SendMessage"
-	ChatService_ChatStream_FullMethodName  = "/chat.ChatService/ChatStream"
+	ChatService_ChatStream_FullMethodName = "/chat.ChatService/ChatStream"
 )
 
 // ChatServiceClient is the client API for ChatService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ChatServiceClient interface {
-	SendMessage(ctx context.Context, in *MessageRequest, opts ...grpc.CallOption) (*MessageResponse, error)
 	ChatStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[MessageRequest, MessageResponse], error)
 }
 
@@ -37,16 +35,6 @@ type chatServiceClient struct {
 
 func NewChatServiceClient(cc grpc.ClientConnInterface) ChatServiceClient {
 	return &chatServiceClient{cc}
-}
-
-func (c *chatServiceClient) SendMessage(ctx context.Context, in *MessageRequest, opts ...grpc.CallOption) (*MessageResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(MessageResponse)
-	err := c.cc.Invoke(ctx, ChatService_SendMessage_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 func (c *chatServiceClient) ChatStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[MessageRequest, MessageResponse], error) {
@@ -66,7 +54,6 @@ type ChatService_ChatStreamClient = grpc.BidiStreamingClient[MessageRequest, Mes
 // All implementations must embed UnimplementedChatServiceServer
 // for forward compatibility.
 type ChatServiceServer interface {
-	SendMessage(context.Context, *MessageRequest) (*MessageResponse, error)
 	ChatStream(grpc.BidiStreamingServer[MessageRequest, MessageResponse]) error
 	mustEmbedUnimplementedChatServiceServer()
 }
@@ -78,9 +65,6 @@ type ChatServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedChatServiceServer struct{}
 
-func (UnimplementedChatServiceServer) SendMessage(context.Context, *MessageRequest) (*MessageResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SendMessage not implemented")
-}
 func (UnimplementedChatServiceServer) ChatStream(grpc.BidiStreamingServer[MessageRequest, MessageResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method ChatStream not implemented")
 }
@@ -105,24 +89,6 @@ func RegisterChatServiceServer(s grpc.ServiceRegistrar, srv ChatServiceServer) {
 	s.RegisterService(&ChatService_ServiceDesc, srv)
 }
 
-func _ChatService_SendMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MessageRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ChatServiceServer).SendMessage(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ChatService_SendMessage_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ChatServiceServer).SendMessage(ctx, req.(*MessageRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _ChatService_ChatStream_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(ChatServiceServer).ChatStream(&grpc.GenericServerStream[MessageRequest, MessageResponse]{ServerStream: stream})
 }
@@ -136,12 +102,7 @@ type ChatService_ChatStreamServer = grpc.BidiStreamingServer[MessageRequest, Mes
 var ChatService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "chat.ChatService",
 	HandlerType: (*ChatServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "SendMessage",
-			Handler:    _ChatService_SendMessage_Handler,
-		},
-	},
+	Methods:     []grpc.MethodDesc{},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "ChatStream",

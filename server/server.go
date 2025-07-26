@@ -1,88 +1,148 @@
 package server
 
 import (
-	"context"
+	"encoding/json"
 	"log"
-	"sync"
 	"time"
+	"fmt"
 
+	"github.com/nats-io/nats.go"
 	pb "github.com/pgibb96/MessageApp/proto"
 )
 
 type ChatServer struct {
 	pb.UnimplementedChatServiceServer
-	mu      sync.Mutex
-	clients map[string]pb.ChatService_ChatStreamServer
+	nc *nats.Conn
+	js nats.JetStreamContext 
 }
 
-func NewServer() *ChatServer {
-	return &ChatServer{
-		clients: make(map[string]pb.ChatService_ChatStreamServer),
-	}
+type inboundMessage struct {
+	Sender    string `json:"sender"`
+	Message   string `json:"message"`
+	Channel   string `json:"channel"`
+	Timestamp int64  `json:"timestamp"`
 }
 
-// SendMessage is a simple unary RPC (optional)
-func (s *ChatServer) SendMessage(ctx context.Context, req *pb.MessageRequest) (*pb.MessageResponse, error) {
-	log.Printf("[Unary] %s: %s", req.Sender, req.Message)
-
-	return &pb.MessageResponse{
-		Sender:    req.Sender,
-		Message:   req.Message,
-		Timestamp: time.Now().Unix(),
-	}, nil
+// NewServer creates a new ChatServer with a NATS connection and JetStream context
+func NewServer(nc *nats.Conn, js nats.JetStreamContext) *ChatServer {
+    return &ChatServer{
+        nc: nc,
+        js: js,
+    }
 }
 
-// ChatStream handles bidirectional chat
 func (s *ChatServer) ChatStream(stream pb.ChatService_ChatStreamServer) error {
-	// Read first message to register client
-	first, err := stream.Recv()
-	if err != nil {
-		return err
-	}
+	ctx := stream.Context()
+	subs := make(map[string]*nats.Subscription)
+	username := ""
 
-	sender := first.Sender
-	log.Printf("Client joined: %s", sender)
+	// Ensure cleanup on exit
+	defer func() {
+		for _, sub := range subs {
+			sub.Unsubscribe()
+		}
+	}()
 
-	s.mu.Lock()
-	s.clients[sender] = stream
-	s.mu.Unlock()
-
-	// Broadcast the first message
-	s.broadcast(sender, first.Message)
-
-	// Read incoming messages
 	for {
-		msg, err := stream.Recv()
+		req, err := stream.Recv()
 		if err != nil {
-			log.Printf("Client %s disconnected: %v", sender, err)
-			s.mu.Lock()
-			delete(s.clients, sender)
-			s.mu.Unlock()
-			return err
+			return nil // client disconnected
 		}
 
-		log.Printf("[%s]: %s", msg.Sender, msg.Message)
-		s.broadcast(msg.Sender, msg.Message)
-	}
-}
-
-func (s *ChatServer) broadcast(sender, message string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for name, client := range s.clients {
-		if name == sender {
-			continue
+		if username == "" {
+			username = req.Sender
 		}
 
-		err := client.Send(&pb.MessageResponse{
-			Sender:    sender,
-			Message:   message,
-			Timestamp: time.Now().Unix(),
-		})
+		switch req.Type {
+		case pb.RequestType_JOIN:
+			channel := req.Channel
+			subject := "chat." + channel
+			consumerName := fmt.Sprintf("%s-consumer-%s", username, channel)
 
-		if err != nil {
-			log.Printf("Failed to send to %s: %v", name, err)
+			if _, exists := subs[channel]; exists {
+				continue
+			}
+
+			sub, err := s.js.Subscribe(subject, func(msg *nats.Msg) {
+				var data inboundMessage
+				if err := json.Unmarshal(msg.Data, &data); err != nil {
+					log.Printf("Unmarshal error: %v", err)
+					return
+				}
+
+				err = stream.Send(&pb.MessageResponse{
+					Sender:    data.Sender,
+					Message:   data.Message,
+					Timestamp: data.Timestamp,
+					Channel:   data.Channel,
+				})
+				if err != nil {
+					log.Printf("gRPC send error: %v", err)
+				} else {
+					msg.Ack() // ACK after successful send
+				}
+			}, nats.Durable(consumerName),
+				nats.ManualAck(),
+				nats.AckExplicit(),
+				nats.BindStream("CHAT"),
+			)
+
+			if err != nil {
+				log.Printf("Error subscribing to channel %s: %v", channel, err)
+				continue
+			}
+
+			subs[channel] = sub
+
+			// Cleanup on context cancel
+			go func(ch string, s *nats.Subscription) {
+				<-ctx.Done()
+				s.Unsubscribe()
+				log.Printf("Unsubscribed %s from %s", username, ch)
+			}(channel, sub)
+
+		case pb.RequestType_LEAVE:
+			channel := req.Channel
+			if sub, ok := subs[channel]; ok {
+				sub.Unsubscribe()
+				delete(subs, channel)
+			}
+
+		case pb.RequestType_MESSAGE:
+			event := inboundMessage{
+				Sender:    req.Sender,
+				Message:   req.Message,
+				Channel:   req.Channel,
+				Timestamp: time.Now().Unix(),
+			}
+		
+			data, err := json.Marshal(event)
+			if err != nil {
+				log.Printf("Marshal error: %v", err)
+				continue
+			}
+		
+			subject := "chat." + req.Channel
+		
+			// Optionally add context-aware publish
+			ack, err := s.js.PublishMsgAsync(&nats.Msg{
+				Subject: subject,
+				Data:    data,
+				Header:  nats.Header{"sender": []string{req.Sender}},
+			})
+			if err != nil {
+				log.Printf("Publish error: %v", err)
+				continue
+			}
+		
+			select {
+			case <-ack.Ok():
+				log.Printf("✅ Message published to %s", subject)
+			case err := <-ack.Err():
+				log.Printf("❌ JetStream publish failed: %v", err)
+			case <-ctx.Done():
+				log.Printf("⏹️ Publish canceled due to stream close")
+			}
 		}
 	}
 }
